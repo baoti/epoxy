@@ -29,7 +29,7 @@ class ViewTypeManager {
     return getViewTypeInternal(model);
   }
 
-  private static int getViewTypeInternal(EpoxyModel<?> model) {
+  static int getViewTypeInternal(EpoxyModel<?> model) {
     int defaultViewType = model.getViewType();
     if (defaultViewType != 0) {
       return defaultViewType;

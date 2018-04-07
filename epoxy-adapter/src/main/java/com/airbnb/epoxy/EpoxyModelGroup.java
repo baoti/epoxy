@@ -14,6 +14,7 @@ import com.airbnb.viewmodeladapter.R;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -73,6 +74,7 @@ public class EpoxyModelGroup extends EpoxyModelWithHolder<Holder>
   protected final List<? extends EpoxyModel<?>> models;
   /** By default we save view state if any of the models need to save state. */
   private final boolean shouldSaveViewState;
+  int bindLayoutCount;
 
   /**
    * @param layoutRes The layout to use with these models.
@@ -125,10 +127,14 @@ public class EpoxyModelGroup extends EpoxyModelWithHolder<Holder>
         }
       }
     });
+    bindLayoutCount--;
+    groupHolder.postBindModelGroup(this);
   }
 
   @Override
   public void handlePreBind(final EpoxyViewHolder holder, Holder groupHolder, final int position) {
+    groupHolder.preBindModelGroup(this);
+    bindLayoutCount++;
     iterateModels(groupHolder, new IterateModelsCallback() {
       @Override
       public void onModel(EpoxyModel model, Object boundObject, View view, int modelIndex) {
@@ -143,6 +149,7 @@ public class EpoxyModelGroup extends EpoxyModelWithHolder<Holder>
   @CallSuper
   @Override
   public void bind(@NonNull Holder holder) {
+    holder.preBindModelGroup(this);
     iterateModels(holder, new IterateModelsCallback() {
       @Override
       public void onModel(EpoxyModel model, Object boundObject, View view, int modelIndex) {
@@ -151,11 +158,13 @@ public class EpoxyModelGroup extends EpoxyModelWithHolder<Holder>
         model.bind(boundObject);
       }
     });
+    holder.postBindModelGroup(this);
   }
 
   @CallSuper
   @Override
   public void bind(@NonNull Holder holder, @NonNull final List<Object> payloads) {
+    holder.preBindModelGroup(this);
     iterateModels(holder, new IterateModelsCallback() {
       @Override
       public void onModel(EpoxyModel model, Object boundObject, View view, int modelIndex) {
@@ -164,6 +173,7 @@ public class EpoxyModelGroup extends EpoxyModelWithHolder<Holder>
         model.bind(boundObject);
       }
     });
+    holder.postBindModelGroup(this);
   }
 
   @Override
@@ -174,17 +184,18 @@ public class EpoxyModelGroup extends EpoxyModelWithHolder<Holder>
     }
 
     final EpoxyModelGroup previousGroup = (EpoxyModelGroup) previouslyBoundModel;
-    if (previousGroup.models.size() != models.size()) {
-      throw createInconsistentModelCountException();
-    }
 
+    holder.preBindModelGroup(this);
     iterateModels(holder, new IterateModelsCallback() {
       @Override
       public void onModel(EpoxyModel model, Object boundObject, View view, int modelIndex) {
         setViewVisibility(model, view);
 
-        EpoxyModel<?> previousModel = previousGroup.models.get(modelIndex);
-        if (previousModel.id() == model.id()) {
+        EpoxyModel<?> previousModel = null;
+        if (modelIndex < previousGroup.models.size()) {
+          previousModel = previousGroup.models.get(modelIndex);
+        }
+        if (previousModel != null && previousModel.id() == model.id()) {
           //noinspection unchecked
           model.bind(boundObject, previousModel);
         } else {
@@ -193,6 +204,7 @@ public class EpoxyModelGroup extends EpoxyModelWithHolder<Holder>
         }
       }
     });
+    holder.postBindModelGroup(this);
   }
 
   private static void setViewVisibility(EpoxyModel model, View view) {
@@ -213,14 +225,17 @@ public class EpoxyModelGroup extends EpoxyModelWithHolder<Holder>
         model.unbind(boundObject);
       }
     });
+    holder.unbindModelGroup(this);
   }
 
   @CallSuper
   @Override
-  public void onViewAttachedToWindow(Holder holder) {
+  public void onViewAttachedToWindow(final Holder holder) {
+    holder.setAttached(true);
     iterateModels(holder, new IterateModelsCallback() {
       @Override
       public void onModel(EpoxyModel model, Object boundObject, View view, int modelIndex) {
+        holder.setChildAttached(modelIndex, true);
         //noinspection unchecked
         model.onViewAttachedToWindow(boundObject);
       }
@@ -229,10 +244,12 @@ public class EpoxyModelGroup extends EpoxyModelWithHolder<Holder>
 
   @CallSuper
   @Override
-  public void onViewDetachedFromWindow(Holder holder) {
+  public void onViewDetachedFromWindow(final Holder holder) {
+    holder.setAttached(false);
     iterateModels(holder, new IterateModelsCallback() {
       @Override
       public void onModel(EpoxyModel model, Object boundObject, View view, int modelIndex) {
+        holder.setChildAttached(modelIndex, false);
         //noinspection unchecked
         model.onViewDetachedFromWindow(boundObject);
       }
@@ -299,15 +316,39 @@ public class EpoxyModelGroup extends EpoxyModelWithHolder<Holder>
     return true;
   }
 
+  protected boolean isSameChildViewType(EpoxyModel<?> childA, EpoxyModel<?> childB, int position) {
+    return getChildViewType(childA, position) == getChildViewType(childB, position);
+  }
+
+  protected int getChildViewType(EpoxyModel<?> model, int modelPosition) {
+    return ViewTypeManager.getViewTypeInternal(model);
+  }
+
+  private View getRecycledChild(Holder holder, ViewGroup parent, EpoxyModel model, int position) {
+    return null;
+  }
+
+  private void putRecycledChild(Holder holder, ViewGroup parent, EpoxyModel model, View view,
+      int position) {
+
+  }
+
   @Override
   protected final Holder createNewHolder() {
     return new Holder();
   }
 
-  public class Holder extends EpoxyHolder {
-    private List<View> views;
-    private List<EpoxyHolder> holders;
+  public static class Holder extends EpoxyHolder {
+    private EpoxyModelGroup modelGroup;
+    private List<? extends EpoxyModel<?>> models = Collections.emptyList();
+    private List<View> views = Collections.emptyList();
+    private List<EpoxyHolder> holders = Collections.emptyList();
+    private List<ViewStubData> viewStubs = Collections.emptyList();
+    private boolean[] childAttached = new boolean[0];
     private ViewGroup rootView;
+    private ViewGroup childContainer;
+    private boolean useViewStubs;
+    private boolean attached;
 
     /**
      * Get the root view group (aka
@@ -319,6 +360,162 @@ public class EpoxyModelGroup extends EpoxyModelWithHolder<Holder>
       return rootView;
     }
 
+    public void setAttached(boolean attached) {
+      this.attached = attached;
+    }
+
+    public boolean isAttached() {
+      return attached;
+    }
+
+    protected void preBindModelGroup(@NonNull EpoxyModelGroup modelGroup) {
+      if (rootView == null) {
+        return;
+      }
+      this.modelGroup = modelGroup;
+      final List<? extends EpoxyModel<?>> oldModels = this.models;
+      List<EpoxyHolder> oldHolders = this.holders;
+      List<ViewStubData> oldViewStubs = this.viewStubs;
+      List<View> oldViews = this.views;
+      boolean[] oldChildAttached = this.childAttached;
+      int oldModelCount = oldModels.size();
+
+      final List<? extends EpoxyModel<?>> newModels = modelGroup.models;
+      int newModelCount = newModels.size();
+
+      // Remove
+      boolean hasRemoved = false;
+      for (int pos = oldModelCount - 1; pos >= newModelCount; pos--) {
+        EpoxyModel model = oldModels.get(pos);
+        EpoxyHolder epoxyHolder = oldHolders.get(pos);
+        View view = oldViews.get(pos);
+        ViewStubData stubData = oldViewStubs.get(pos);
+        removeChildModelAndView(stubData, model, epoxyHolder, pos, view);
+        hasRemoved = true;
+      }
+      // Remove if itemType not same
+      for (int pos = Math.min(oldModelCount, newModelCount) - 1; pos >= 0; pos--) {
+        EpoxyModel oldModel = oldModels.get(pos);
+        EpoxyHolder oldEpoxyHolder = oldHolders.get(pos);
+        View oldView = oldViews.get(pos);
+        ViewStubData stubData = oldViewStubs.get(pos);
+        EpoxyModel newModel = newModels.get(pos);
+        if (modelGroup.isSameChildViewType(oldModel, newModel, pos)) {
+          continue;
+        }
+        removeChildModelAndView(stubData, oldModel, oldEpoxyHolder, pos, oldView);
+        hasRemoved = true;
+      }
+
+      this.models = newModels;
+      if (!hasRemoved && oldModelCount == newModelCount) {
+        return;
+      }
+
+      this.views = new ArrayList<>(newModelCount);
+      this.holders = new ArrayList<>(newModelCount);
+      this.viewStubs = new ArrayList<>(newModelCount);
+      this.childAttached = new boolean[newModelCount];
+
+      // Insert if itemType not same
+      for (int pos = 0; pos < Math.min(oldModelCount, newModelCount); pos++) {
+        EpoxyModel oldModel = oldModels.get(pos);
+        EpoxyModel newModel = newModels.get(pos);
+        if (modelGroup.isSameChildViewType(oldModel, newModel, pos)) {
+          views.add(oldViews.get(pos));
+          holders.add(oldHolders.get(pos));
+          viewStubs.add(oldViewStubs.get(pos));
+          childAttached[pos] = oldChildAttached[pos];
+          continue;
+        }
+        addChildModelAndView(newModel, pos);
+      }
+      // Insert
+      for (int pos = oldModelCount; pos < newModelCount; pos++) {
+        EpoxyModel model = newModels.get(pos);
+        addChildModelAndView(model, pos);
+      }
+    }
+
+    protected void postBindModelGroup(@NonNull EpoxyModelGroup modelGroup) {
+      if (rootView == null) {
+        return;
+      }
+      if (this.modelGroup == modelGroup) {
+        if (modelGroup.bindLayoutCount <= 0) {
+          // bind 已完成，使新增的child与整体状态一致
+          if (attached) {
+            for (int pos = 0; pos < childAttached.length; pos++) {
+              if (childAttached[pos]) {
+                continue;
+              }
+              childAttached[pos] = true;
+              EpoxyModel model = models.get(pos);
+              Object objectToBind =
+                  (model instanceof EpoxyModelWithHolder) ? holders.get(pos) : views.get(pos);
+              //noinspection unchecked
+              model.onViewAttachedToWindow(objectToBind);
+            }
+          }
+        }
+      }
+    }
+
+    protected void unbindModelGroup(@NonNull EpoxyModelGroup modelGroup) {
+      if (modelGroup == this.modelGroup) {
+        this.modelGroup = null;
+      }
+    }
+
+    private void addChildModelAndView(EpoxyModel model, int pos) {
+      View view;
+      ViewStubData stubData = null;
+      if (useViewStubs) {
+        stubData = getNextViewStubPosition(childContainer);
+        if (stubData == null) {
+          throw new IllegalStateException(
+              "Your layout should provide a ViewStub for each model to be inflated into.");
+        }
+        View recycledView = null;
+        recycledView = modelGroup.getRecycledChild(this, stubData.viewGroup, model, pos);
+        view = replaceNextViewStub(stubData, model, recycledView,
+            modelGroup.useViewStubLayoutParams(model, pos));
+      } else {
+        View recycledView = null;
+        recycledView = modelGroup.getRecycledChild(this, childContainer, model, pos);
+        view = createAndAddView(childContainer, model, recycledView);
+      }
+      EpoxyHolder epoxyHolder = null;
+      if (model instanceof EpoxyModelWithHolder) {
+        epoxyHolder = ((EpoxyModelWithHolder) model).createNewHolder();
+        epoxyHolder.bindView(view);
+      }
+      views.add(view);
+      holders.add(epoxyHolder);
+      viewStubs.add(stubData);
+    }
+
+    private void removeChildModelAndView(ViewStubData stubData, EpoxyModel model,
+        EpoxyHolder epoxyHolder, int position, View view) {
+      Object objectToBind = (model instanceof EpoxyModelWithHolder) ? epoxyHolder : view;
+      if (attached) {
+        //noinspection unchecked
+        model.onViewDetachedFromWindow(objectToBind);
+      }
+      ViewGroup parent;
+      if (useViewStubs) {
+        parent = stubData.viewGroup;
+        parent.removeView(view);
+        parent.addView(stubData.viewStub, stubData.position);
+      } else {
+        parent = childContainer;
+        parent.removeView(view);
+      }
+      //noinspection unchecked
+      model.unbind(objectToBind);
+      modelGroup.putRecycledChild(this, parent, model, view, position);
+    }
+
     @Override
     protected void bindView(View itemView) {
       if (!(itemView instanceof ViewGroup)) {
@@ -326,32 +523,8 @@ public class EpoxyModelGroup extends EpoxyModelWithHolder<Holder>
             "The layout provided to EpoxyModelGroup must be a ViewGroup");
       }
       rootView = (ViewGroup) itemView;
-      ViewGroup childContainer = findChildContainer(rootView);
-
-      int modelCount = models.size();
-      views = new ArrayList<>(modelCount);
-      holders = new ArrayList<>(modelCount);
-
-      boolean useViewStubs = childContainer.getChildCount() != 0;
-      for (int i = 0; i < models.size(); i++) {
-        EpoxyModel model = models.get(i);
-        View view;
-        if (useViewStubs) {
-          view = replaceNextViewStub(childContainer, model, useViewStubLayoutParams(model, i));
-        } else {
-          view = createAndAddView(childContainer, model);
-        }
-
-        if (model instanceof EpoxyModelWithHolder) {
-          EpoxyHolder holder = ((EpoxyModelWithHolder) model).createNewHolder();
-          holder.bindView(view);
-          holders.add(holder);
-        } else {
-          holders.add(null);
-        }
-
-        views.add(view);
-      }
+      childContainer = findChildContainer(rootView);
+      useViewStubs = childContainer.getChildCount() != 0;
     }
 
     /**
@@ -369,8 +542,9 @@ public class EpoxyModelGroup extends EpoxyModelWithHolder<Holder>
       return outermostRoot;
     }
 
-    private View createAndAddView(ViewGroup groupView, EpoxyModel<?> model) {
-      View modelView = model.buildView(groupView);
+    private View createAndAddView(ViewGroup groupView, EpoxyModel<?> model,
+        View recycledView) {
+      View modelView = recycledView != null ? recycledView : model.buildView(groupView);
       LayoutParams modelLayoutParams = modelView.getLayoutParams();
       if (modelLayoutParams != null) {
         groupView.addView(modelView, modelLayoutParams);
@@ -380,16 +554,11 @@ public class EpoxyModelGroup extends EpoxyModelWithHolder<Holder>
       return modelView;
     }
 
-    private View replaceNextViewStub(ViewGroup groupView, EpoxyModel<?> model,
-        boolean useStubLayoutParams) {
-      ViewStubData stubData = getNextViewStubPosition(groupView);
-      if (stubData == null) {
-        throw new IllegalStateException(
-            "Your layout should provide a ViewStub for each model to be inflated into.");
-      }
+    private View replaceNextViewStub(ViewStubData stubData, EpoxyModel<?> model,
+        View recycledView, boolean useStubLayoutParams) {
 
       stubData.viewGroup.removeView(stubData.viewStub);
-      View modelView = model.buildView(stubData.viewGroup);
+      View modelView = recycledView != null ? recycledView : model.buildView(stubData.viewGroup);
 
       // Carry over the stub id manually since we aren't inflating via the stub
       int inflatedId = stubData.viewStub.getInflatedId();
@@ -426,6 +595,10 @@ public class EpoxyModelGroup extends EpoxyModelWithHolder<Holder>
       }
 
       return null;
+    }
+
+    public void setChildAttached(int index, boolean attached) {
+      childAttached[index] = attached;
     }
   }
 
